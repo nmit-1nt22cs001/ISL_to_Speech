@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pkl
+*.mp3
+*.wav
+*.log
+*.exe
+temp/
+.env
+model.p
+data.pickle
