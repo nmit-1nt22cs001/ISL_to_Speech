@@ -3,7 +3,8 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 
 // Backend API base URL - change this to match your Flask server
-const API_BASE_URL = process.env.REACT_APP_API_URL || "http://127.0.0.1:5000";
+const API_BASE_URL =
+  import.meta.env.VITE_API_URL || "http://127.0.0.1:5000";
 
 /**
  * Custom hook to fetch and manage backend data
@@ -38,6 +39,7 @@ export function useBackendData(pollingInterval = 300) {
   const [sentenceChanged, setSentenceChanged] = useState(false);
 
   const fetchData = useCallback(async () => {
+    if (!isPolling) return;
     try {
       const response = await fetch(`${API_BASE_URL}/data`, {
         method: "GET",
@@ -107,7 +109,7 @@ export function useBackendData(pollingInterval = 300) {
 
       console.error("Failed to fetch backend data:", err);
     }
-  }, []);
+  }, [isPolling]);
 
   // Polling effect
   useEffect(() => {

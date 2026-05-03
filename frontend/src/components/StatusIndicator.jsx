@@ -8,6 +8,21 @@ import { motion } from "framer-motion";
  * Different colors and animations for each state
  */
 function StatusIndicator({ status, isConnected }) {
+  const colorClassMap = {
+    "accent-primary": "text-accent-primary",
+    "accent-warning": "text-accent-warning",
+    "accent-success": "text-accent-success",
+    "gray-400": "text-gray-400",
+    "gray-500": "text-gray-500",
+  };
+
+  const dotColorClassMap = {
+    "accent-primary": "bg-accent-primary",
+    "accent-warning": "bg-accent-warning",
+    "accent-success": "bg-accent-success",
+    "gray-400": "bg-gray-400",
+    "gray-500": "bg-gray-500",
+  };
   // Define status configurations
   const statusConfig = {
     "Detecting...": {
@@ -127,12 +142,12 @@ function StatusIndicator({ status, isConnected }) {
       className={`flex items-center gap-4 p-4 rounded-xl ${config.bgColor} border ${config.borderColor} transition-all duration-300`}
     >
       {/* Status icon */}
-      <div className={`text-${config.color}`}>{config.icon}</div>
+      <div className={colorClassMap[config.color]}>{config.icon}</div>
 
       {/* Status text */}
       <div className="flex-1">
         <div className="flex items-center gap-2">
-          <span className={`font-semibold text-${config.color}`}>
+          <span className={`font-semibold ${colorClassMap[config.color]}`}>
             {status || "Idle"}
           </span>
           {/* Animated dots for active states */}
@@ -147,7 +162,7 @@ function StatusIndicator({ status, isConnected }) {
                     repeat: Infinity,
                     delay: i * 0.2,
                   }}
-                  className={`w-1 h-1 rounded-full bg-${config.color}`}
+                  className={`w-1 h-1 rounded-full ${dotColorClassMap[config.color]}`}
                 />
               ))}
             </span>

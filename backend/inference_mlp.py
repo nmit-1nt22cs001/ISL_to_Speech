@@ -34,6 +34,9 @@ UNKNOWN_LIMIT = 3
 stop_active = False
 stop_start_time = None
 
+STREAM_WIDTH = 640
+FRAME_SLEEP = 0.015
+
 #==========================
 # Load MLP model + encoder
 # =========================
@@ -46,7 +49,7 @@ SPEECH_THRESHOLD = 0.95  # 🔥 stricter than detection
 # =========================
 # Sentence timing
 # =========================
-NO_HANDS_TIMEOUT = 2.0
+NO_HANDS_TIMEOUT = 1.0
 last_hand_time = time.time()
 
 
@@ -68,8 +71,8 @@ def convert_to_english(words):
 # =========================
 # Stability Buffers
 # =========================
-confidence_buffer = deque(maxlen=5)
-label_buffer = deque(maxlen=5)
+confidence_buffer = deque(maxlen=4)
+label_buffer = deque(maxlen=4)
 
 fps_buffer = deque(maxlen=10)
 
@@ -136,6 +139,10 @@ hands = mp_hands.Hands(
 # Webcam
 # =========================
 cap = cv2.VideoCapture(0)
+cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+cap.set(cv2.CAP_PROP_FPS, 30)
 
 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
@@ -285,14 +292,14 @@ def run_detection():
                 confidence_buffer.append(max_prob)
                 label_buffer.append(raw_label)
 
-                if len(label_buffer) == 5:
+                if len(label_buffer) == 4:
                     most_common_label = max(set(label_buffer), key=label_buffer.count)
 
-                    if label_buffer.count(most_common_label) == 5:
+                    if label_buffer.count(most_common_label) >= 3:
                         avg_conf = sum(confidence_buffer) / len(confidence_buffer)
                         final_confidence = avg_conf
 
-                        if most_common_label != "UNKNOWN" and avg_conf >= 0.95:
+                        if most_common_label != "UNKNOWN" and avg_conf >= 0.93:
                             detected_label = most_common_label
                         else:
                             detected_label = "UNKNOWN"
@@ -400,18 +407,39 @@ def generate_frames():
 
         with frame_lock:
             if frame_global is None:
-                time.sleep(0.05)
+                time.sleep(0.03)
                 continue
             frame_copy = frame_global.copy()
 
-        ret, buffer = cv2.imencode('.jpg', frame_copy)
+        # Only resize the streamed frame.
+        # Detection still uses original frame quality.
+        h, w, _ = frame_copy.shape
+        if w > STREAM_WIDTH:
+            scale = STREAM_WIDTH / w
+            frame_copy = cv2.resize(
+                frame_copy,
+                (STREAM_WIDTH, int(h * scale)),
+                interpolation=cv2.INTER_AREA
+            )
+
+        ret, buffer = cv2.imencode(
+            ".jpg",
+            frame_copy,
+            [int(cv2.IMWRITE_JPEG_QUALITY), 70]
+        )
+
         if not ret:
+            time.sleep(FRAME_SLEEP)
             continue
 
-        frame = buffer.tobytes()
+        yield (
+            b"--frame\r\n"
+            b"Content-Type: image/jpeg\r\n\r\n" +
+            buffer.tobytes() +
+            b"\r\n"
+        )
 
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
+        time.sleep(FRAME_SLEEP)
         
 
 def cleanup():

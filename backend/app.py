@@ -4,13 +4,14 @@ from flask import Flask, Response, jsonify, request
 from flask_cors import CORS
 import threading
 import inference_mlp as infer
+# from time import time
 
 app = Flask(__name__)
 CORS(app)
 
 @app.route('/video')
 def video_feed():
-    print("📡 Video stream requested")
+    # print("📡 Video stream requested")
     return Response(
         infer.generate_frames(),
         mimetype='multipart/x-mixed-replace; boundary=frame',
@@ -30,6 +31,17 @@ def get_data():
         'stopStartTime': infer.stop_start_time,
         'stopBuffer': infer.buffer_controller.get_buffer()
     })
+# last_sent = 0
+
+# @app.route('/data')
+# def get_data():
+#     global last_sent
+#     now = time()
+
+#     if now - last_sent < 0.2:
+#         return jsonify({})  # skip extra calls
+
+#     last_sent = now
 
 @app.route('/start', methods=['POST'])
 def start():

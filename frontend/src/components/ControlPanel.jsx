@@ -23,7 +23,7 @@ function ControlPanel({
   };
 
   return (
-    <div className="glass-card p-5">
+    <div className="neo-card p-5">
       {/* Header */}
       <div className="flex items-center gap-3 mb-5">
         <div className="w-9 h-9 rounded-lg bg-dark-600 flex items-center justify-center">

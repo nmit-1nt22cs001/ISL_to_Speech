@@ -9,7 +9,7 @@ import { motion, AnimatePresence } from "framer-motion";
  */
 function SentenceBuffer({ buffer }) {
   return (
-    <div className="glass-card p-5">
+    <div className="neo-card p-5">
       {/* Header */}
       <div className="flex items-center gap-3 mb-4">
         <div className="w-9 h-9 rounded-lg bg-accent-warning/20 flex items-center justify-center">

@@ -33,7 +33,7 @@ function App() {
     clearSentence,
     toggleSpeech,
     videoUrl,
-  } = useBackendData(300); // Poll every 300ms
+  } = useBackendData(800); // Poll every 800ms
 
   // Handlers
   const handleStartStream = useCallback(async () => {
@@ -52,11 +52,10 @@ function App() {
 
   useEffect(() => {
     return () => {
-      if (isStreaming) {
-        stopStream();
-      }
+      stopStream();
+      stopPolling();
     };
-  }, [isStreaming, stopStream]);
+  }, [stopStream, stopPolling]);
 
   const handleClearSentence = useCallback(() => {
     clearSentence();
@@ -94,7 +93,7 @@ function App() {
   }, [isStreaming, handleStartStream, handleStopStream, handleClearSentence]);
 
   return (
-    <div className="min-h-screen bg-grid">
+    <div className="app-shell bg-grid">
       {/* Gradient overlay */}
       <div className="fixed inset-0 bg-gradient-to-br from-accent-primary/5 via-transparent to-accent-secondary/5 pointer-events-none" />
 
@@ -105,7 +104,7 @@ function App() {
           initial={{ opacity: 0, y: -20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5 }}
-          className="text-center mb-8"
+          className="app-header-card"
         >
           <div className="inline-flex items-center gap-3 mb-3">
             <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-accent-primary to-accent-secondary flex items-center justify-center shadow-lg shadow-accent-primary/25">
@@ -150,13 +149,13 @@ function App() {
         </motion.header>
 
         {/* Main grid layout */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="dashboard-grid">
           {/* Left column - Video feed */}
           <motion.div
             initial={{ opacity: 0, x: -20 }}
             animate={{ opacity: 1, x: 0 }}
             transition={{ duration: 0.5, delay: 0.1 }}
-            className="lg:col-span-2"
+            className="video-panel"
           >
             <VideoFeed
               videoUrl={videoUrl}
@@ -170,7 +169,7 @@ function App() {
             initial={{ opacity: 0, x: 20 }}
             animate={{ opacity: 1, x: 0 }}
             transition={{ duration: 0.5, delay: 0.2 }}
-            className="space-y-4"
+            className="side-panel"
           >
             {/* Status indicator */}
             <StatusIndicator
@@ -212,7 +211,7 @@ function App() {
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5, delay: 0.3 }}
-          className="grid grid-cols-1 lg:grid-cols-2 gap-6 mt-6"
+          className="bottom-panel"
         >
           {/* Sentence buffer */}
           <SentenceBuffer buffer={data.buffer} />
