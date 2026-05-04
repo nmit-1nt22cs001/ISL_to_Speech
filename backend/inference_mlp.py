@@ -1,4 +1,4 @@
-# inference_mlp.py
+# inference_mlp.py  (memory-fixed version)
 
 import pickle
 import cv2
@@ -12,46 +12,50 @@ import queue
 import tempfile
 import os
 import time
-import sys
+import gc
 from collections import deque
 from gesture_buffer2 import GestureBuffer
 import atexit
 
+# =========================
+# Shared state
+# =========================
+current_word      = ""
+word_buffer       = []
+final_sentence    = ""
+detection_status  = "Idle"
+confidence_score  = 0
+current_fps       = 0
+frame_global      = None       # latest JPEG bytes (not a full ndarray)
+streaming         = False
+frame_lock        = threading.Lock()
+speech_enabled    = True
 
-current_word = ""
-word_buffer = []
-final_sentence = ""
-detection_status = "Idle"
-confidence_score = 0
-current_fps = 0
-frame_global = None
-streaming = False
-frame_lock = threading.Lock()
+unknown_counter   = 0
+UNKNOWN_LIMIT     = 3
 
-unknown_counter = 0
-UNKNOWN_LIMIT = 3
+stop_active       = False
+stop_start_time   = None
 
-stop_active = False
-stop_start_time = None
+# Stream quality – keep low to reduce memory pressure
+STREAM_WIDTH  = 480            # ↓ from 640
+JPEG_QUALITY  = 60             # ↓ from 70 (saves ~30% per frame)
+FRAME_SLEEP   = 0.033          # ~30 fps cap for the stream
 
-STREAM_WIDTH = 640
-FRAME_SLEEP = 0.015
-
-#==========================
+# =========================
 # Load MLP model + encoder
 # =========================
-model = load_model("gesture_mlp.h5")
+model   = load_model("gesture_mlp.h5")
 encoder = pickle.load(open("label_encoder.p", "rb"))
 
-THRESHOLD = 0.98  # 🔥 Strong rejection
-SPEECH_THRESHOLD = 0.95  # 🔥 stricter than detection
+THRESHOLD        = 0.98
+SPEECH_THRESHOLD = 0.95
 
 # =========================
 # Sentence timing
 # =========================
 NO_HANDS_TIMEOUT = 1.0
-last_hand_time = time.time()
-
+last_hand_time   = time.time()
 
 # =========================
 # Sentence Buffer + NLP
@@ -60,21 +64,18 @@ sentence_buffer = []
 
 def convert_to_english(words):
     sentence = " ".join(words)
-
     rules = {
         "YOUR NAME WHAT": "What is your name?",
-        "MY KNOW DON'T": "I don't know.",
+        "MY KNOW DON'T":  "I don't know.",
     }
-
     return rules.get(sentence, sentence.capitalize())
 
 # =========================
-# Stability Buffers
+# Stability Buffers (bounded)
 # =========================
 confidence_buffer = deque(maxlen=4)
-label_buffer = deque(maxlen=4)
-
-fps_buffer = deque(maxlen=10)
+label_buffer      = deque(maxlen=4)
+fps_buffer        = deque(maxlen=10)
 
 # =========================
 # Gesture Buffer
@@ -82,11 +83,11 @@ fps_buffer = deque(maxlen=10)
 buffer_controller = GestureBuffer()
 
 # =========================
-# Audio setup
+# Audio – single worker thread
 # =========================
 pygame.mixer.init()
-speech_queue = queue.Queue()
-exit_event = threading.Event()
+speech_queue = queue.Queue(maxsize=2)   # cap prevents unbounded growth
+exit_event   = threading.Event()
 
 def speech_worker():
     while not exit_event.is_set():
@@ -98,8 +99,9 @@ def speech_worker():
         if text == "_EXIT_":
             break
 
+        temp_path = None
         try:
-            temp_path = os.path.join(tempfile.gettempdir(), f"{time.time()}.mp3")
+            temp_path = os.path.join(tempfile.gettempdir(), f"isl_{os.getpid()}_{int(time.time()*1000)}.mp3")
             tts = gTTS(text=text, lang='en')
             tts.save(temp_path)
 
@@ -113,10 +115,14 @@ def speech_worker():
                 time.sleep(0.05)
 
             pygame.mixer.music.unload()
-            os.remove(temp_path)
-
         except Exception as e:
             print("TTS Error:", e)
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
 
         speech_queue.task_done()
 
@@ -124,15 +130,17 @@ tts_thread = threading.Thread(target=speech_worker, daemon=True)
 tts_thread.start()
 
 # =========================
-# MediaPipe setup (ONLY HANDS)
+# MediaPipe – reuse a single instance
 # =========================
-mp_hands = mp.solutions.hands
+mp_hands   = mp.solutions.hands
 mp_drawing = mp.solutions.drawing_utils
 
 hands = mp_hands.Hands(
     static_image_mode=False,
     max_num_hands=2,
-    min_detection_confidence=0.6
+    min_detection_confidence=0.6,
+    min_tracking_confidence=0.5,   # added – reduces re-detection overhead
+    model_complexity=0,            # lightest model
 )
 
 # =========================
@@ -140,29 +148,28 @@ hands = mp_hands.Hands(
 # =========================
 cap = cv2.VideoCapture(0)
 cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 cap.set(cv2.CAP_PROP_FPS, 30)
 
-cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-
-GESTURE_HOLD_TIME = 1.0
-MIN_REPEAT_INTERVAL = 1.0
-prev_label = None
-gesture_start_time = None
-last_spoken_time = 0
-final_confidence = 0
-speech_enabled = True
+GESTURE_HOLD_TIME    = 1.0
+MIN_REPEAT_INTERVAL  = 1.0
+prev_label           = None
+gesture_start_time   = None
+last_spoken_time     = 0
+final_confidence     = 0
 
 # =========================
-# Main Loop
+# Main detection loop
 # =========================
+_gc_counter = 0   # manual GC pacing
+
 def run_detection():
     global current_word, word_buffer, final_sentence, final_confidence
     global detection_status, confidence_score, current_fps, frame_global, streaming
     global last_hand_time, prev_label, gesture_start_time, last_spoken_time, unknown_counter
-    global stop_active, stop_start_time
-    
+    global stop_active, stop_start_time, _gc_counter
+
     while True:
         if not streaming:
             if cap.isOpened():
@@ -170,12 +177,11 @@ def run_detection():
             time.sleep(0.1)
             continue
 
-        # Ensure camera is opened when streaming starts
         if not cap.isOpened():
             cap.open(0)
-            
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
         start_time = time.time()
-        stop_flag = stop_active
 
         ret, frame = cap.read()
         if not ret:
@@ -185,62 +191,47 @@ def run_detection():
             cap.open(0)
             continue
 
-
         H, W, _ = frame.shape
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = hands.process(frame_rgb)
 
-        # =========================
-        # No-hand detection
-        # =========================
+        # Convert in-place (no intermediate copy)
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results   = hands.process(frame_rgb)
+        del frame_rgb   # free immediately
+
+        # ---- No-hand timeout → sentence flush ----
         if not results.multi_hand_landmarks:
             if time.time() - last_hand_time > NO_HANDS_TIMEOUT:
                 if sentence_buffer:
-                    print("⏱ No hands → Sentence trigger")
-
                     filtered = [w for w in sentence_buffer if w != "UNKNOWN"]
-                    if not filtered:
-                        sentence_buffer.clear()
-                        continue
-
-                    print("🧠 Raw:", filtered)
-
-                    if len(filtered) == 1:
-                        final_sentence = filtered[0].capitalize()
-                    else:
-                        final_sentence = convert_to_english(filtered)
-
-                    print("🗣 Speaking sentence:", final_sentence)
-                    if speech_enabled:
-                        if speech_queue.qsize() < 2:
-                            speech_queue.put(final_sentence)
-
+                    if filtered:
+                        final_sentence = filtered[0].capitalize() if len(filtered) == 1 \
+                                         else convert_to_english(filtered)
+                        print("🗣 Speaking:", final_sentence)
+                        if speech_enabled and speech_queue.qsize() < 2:
+                            try:
+                                speech_queue.put_nowait(final_sentence)
+                            except queue.Full:
+                                pass
                     sentence_buffer.clear()
-
                 last_hand_time = time.time()
-
         else:
             last_hand_time = time.time()
 
-        detected_label = None
+        detected_label   = None
         detection_status = "Idle"
 
         if results.multi_hand_landmarks:
             data_aux, x_, y_ = [], [], []
 
             for hand_landmarks in results.multi_hand_landmarks[:2]:
-                mp_drawing.draw_landmarks(
-                    frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
-
+                mp_drawing.draw_landmarks(frame, hand_landmarks, mp_hands.HAND_CONNECTIONS)
                 for lm in hand_landmarks.landmark:
                     x_.append(lm.x)
                     y_.append(lm.y)
-
                 for lm in hand_landmarks.landmark:
                     data_aux.append(lm.x - min(x_))
                     data_aux.append(lm.y - min(y_))
 
-            # Pad if only 1 hand
             if len(results.multi_hand_landmarks) == 1:
                 data_aux.extend([0] * 42)
 
@@ -250,22 +241,18 @@ def run_detection():
                 detected_label = "UNKNOWN"
                 confidence_buffer.clear()
                 label_buffer.clear()
-                continue
-
-            if len(data_aux) == 84:
-
-                # probs = model.predict(np.asarray([data_aux]), verbose=0)[0]
+            elif len(data_aux) == 84:
+                # --- single model call per frame ---
                 input_data = np.array([data_aux], dtype=np.float32)
-                probs = model(input_data, training=False).numpy()[0]
+                probs      = model(input_data, training=False).numpy()[0]
+                del input_data
 
-                sorted_probs = np.sort(probs)[::-1]
-                max_prob = sorted_probs[0]
-                second_prob = sorted_probs[1]
-
-                confidence_gap = max_prob - second_prob
-                predicted_class = np.argmax(probs)
-
-                raw_label = encoder.inverse_transform([predicted_class])[0]
+                sorted_probs     = np.sort(probs)[::-1]
+                max_prob         = float(sorted_probs[0])
+                second_prob      = float(sorted_probs[1])
+                confidence_gap   = max_prob - second_prob
+                predicted_class  = int(np.argmax(probs))
+                raw_label        = encoder.inverse_transform([predicted_class])[0]
 
                 if raw_label == "Invalid_gesture":
                     raw_label = "UNKNOWN"
@@ -273,8 +260,7 @@ def run_detection():
                 if max_prob < 0.92 or confidence_gap < 0.15:
                     raw_label = "UNKNOWN"
 
-
-                movement = np.std(data_aux)
+                movement = float(np.std(data_aux))
                 if movement > 0.20:
                     raw_label = "UNKNOWN"
 
@@ -294,36 +280,29 @@ def run_detection():
 
                 if len(label_buffer) == 4:
                     most_common_label = max(set(label_buffer), key=label_buffer.count)
-
                     if label_buffer.count(most_common_label) >= 3:
-                        avg_conf = sum(confidence_buffer) / len(confidence_buffer)
+                        avg_conf       = sum(confidence_buffer) / len(confidence_buffer)
                         final_confidence = avg_conf
-
-                        if most_common_label != "UNKNOWN" and avg_conf >= 0.93:
-                            detected_label = most_common_label
-                        else:
-                            detected_label = "UNKNOWN"
+                        detected_label   = most_common_label if (
+                            most_common_label != "UNKNOWN" and avg_conf >= 0.93
+                        ) else "UNKNOWN"
                     else:
                         detected_label = "UNKNOWN"
 
-                x1, y1 = int(min(x_) * W) - 10, int(min(y_) * H) - 10
-                x2, y2 = int(max(x_) * W) + 10, int(max(y_) * H) + 10
-
+                x1 = int(min(x_) * W) - 10
+                y1 = int(min(y_) * H) - 10
+                x2 = int(max(x_) * W) + 10
+                y2 = int(max(y_) * H) + 10
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 3)
 
                 display_label = "..."
-
                 if detected_label:
                     display_label = f"{detected_label} ({int(final_confidence*100)}%)"
                 elif raw_label:
                     display_label = f"{raw_label} (~)"
 
-                cv2.putText(frame, display_label,
-                            (x1, y1 - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            1.0,
-                            (255, 255, 0), 2)
-                
+                cv2.putText(frame, display_label, (x1, y1 - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 0), 2)
 
         if detected_label and detected_label != "UNKNOWN":
             detection_status = "Detecting..."
@@ -332,21 +311,19 @@ def run_detection():
         else:
             detection_status = "No hands detected"
 
-        # =========================
-        # Gesture Timing + Speech
-        # =========================
+        # ---- Gesture timing + word commit ----
         current_time = time.time()
 
         if detected_label != prev_label or detected_label == "UNKNOWN":
             gesture_start_time = current_time
-            prev_label = detected_label
+            prev_label         = detected_label
+        elif (detected_label and detected_label != "UNKNOWN" and
+              (current_time - gesture_start_time) >= GESTURE_HOLD_TIME):
 
-        elif detected_label and detected_label != "UNKNOWN" and (current_time - gesture_start_time) >= GESTURE_HOLD_TIME:
             if (current_time - last_spoken_time) >= MIN_REPEAT_INTERVAL:
-
                 result, stop_flag = buffer_controller.update(detected_label)
-
                 stop_active = stop_flag
+
                 if stop_flag and stop_start_time is None:
                     stop_start_time = time.time()
                 elif not stop_flag:
@@ -360,46 +337,52 @@ def run_detection():
                         ):
                             sentence_buffer.append(result)
 
-                        current_word = result
-                        word_buffer = sentence_buffer.copy()
+                        current_word     = result
+                        word_buffer      = sentence_buffer.copy()
                         detection_status = "Detecting..."
                         confidence_score = int(final_confidence * 100) if detected_label else 0
 
-                    last_spoken_time = current_time
+                last_spoken_time = current_time
 
             gesture_start_time = current_time
 
-        # =========================
-        # STOP overlay
-        # =========================
         if stop_active:
-            cv2.putText(
-                frame,
-                "STOP MODE ACTIVE",
-                (50, 50),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1.2,
-                (0, 0, 255),
-                3
-            )
+            cv2.putText(frame, "STOP MODE ACTIVE", (50, 50),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 255), 3)
 
-        # =========================
-        # Frame global update
-        # =========================
-        with frame_lock:
-            frame_global = frame.copy()
+        # ---- Encode to JPEG once, store bytes only ----
+        h, w = frame.shape[:2]
+        if w > STREAM_WIDTH:
+            scale = STREAM_WIDTH / w
+            frame = cv2.resize(frame, (STREAM_WIDTH, int(h * scale)),
+                               interpolation=cv2.INTER_AREA)
 
-        # =========================
-        # FPS
-        # =========================
+        ret2, buf = cv2.imencode(".jpg", frame,
+                                 [int(cv2.IMWRITE_JPEG_QUALITY), JPEG_QUALITY])
+        if ret2:
+            with frame_lock:
+                frame_global = buf.tobytes()   # store bytes, not ndarray
+
+        del frame, buf  # explicit free
+
+        # ---- FPS ----
         delta = time.time() - start_time
         if delta > 0:
             fps_buffer.append(1 / delta)
             current_fps = int(sum(fps_buffer) / len(fps_buffer))
 
-def generate_frames():
-    global frame_global, streaming
+        # ---- Periodic GC (every 300 frames) ----
+        _gc_counter += 1
+        if _gc_counter >= 300:
+            gc.collect()
+            _gc_counter = 0
 
+
+# =========================
+# MJPEG generator
+# =========================
+def generate_frames():
+    """Yield pre-encoded JPEG bytes – no second encode/resize needed."""
     while True:
         if not streaming:
             time.sleep(0.1)
@@ -407,48 +390,38 @@ def generate_frames():
 
         with frame_lock:
             if frame_global is None:
-                time.sleep(0.03)
-                continue
-            frame_copy = frame_global.copy()
+                jpeg_bytes = None
+            else:
+                jpeg_bytes = frame_global   # already bytes
 
-        # Only resize the streamed frame.
-        # Detection still uses original frame quality.
-        h, w, _ = frame_copy.shape
-        if w > STREAM_WIDTH:
-            scale = STREAM_WIDTH / w
-            frame_copy = cv2.resize(
-                frame_copy,
-                (STREAM_WIDTH, int(h * scale)),
-                interpolation=cv2.INTER_AREA
-            )
-
-        ret, buffer = cv2.imencode(
-            ".jpg",
-            frame_copy,
-            [int(cv2.IMWRITE_JPEG_QUALITY), 70]
-        )
-
-        if not ret:
-            time.sleep(FRAME_SLEEP)
+        if jpeg_bytes is None:
+            time.sleep(0.03)
             continue
 
         yield (
             b"--frame\r\n"
             b"Content-Type: image/jpeg\r\n\r\n" +
-            buffer.tobytes() +
+            jpeg_bytes +
             b"\r\n"
         )
 
         time.sleep(FRAME_SLEEP)
-        
 
+
+# =========================
+# Cleanup
+# =========================
 def cleanup():
+    exit_event.set()
     if cap.isOpened():
         cap.release()
-    exit_event.set()
     try:
-        tts_thread.join(timeout=1)
-    except:
+        speech_queue.put_nowait("_EXIT_")
+    except queue.Full:
+        pass
+    try:
+        tts_thread.join(timeout=2)
+    except Exception:
         pass
     pygame.mixer.quit()
 

@@ -3,67 +3,78 @@
 from flask import Flask, Response, jsonify, request
 from flask_cors import CORS
 import threading
+import time
 import inference_mlp as infer
-# from time import time
 
 app = Flask(__name__)
 CORS(app)
 
+# ── Rate-limit /data to max 10 calls/second ─────────────────────────────────
+_last_data_sent = 0.0
+_MIN_DATA_INTERVAL = 0.1   # 100 ms
+
+
+@app.route('/health')
+def health():
+    """Simple health-check so the frontend can ping before starting."""
+    return jsonify({"ok": True})
+
+
 @app.route('/video')
 def video_feed():
-    # print("📡 Video stream requested")
     return Response(
         infer.generate_frames(),
         mimetype='multipart/x-mixed-replace; boundary=frame',
-        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
+        headers={"Cache-Control": "no-cache", "Connection": "keep-alive"},
     )
+
 
 @app.route('/data')
 def get_data():
+    global _last_data_sent
+    now = time.time()
+    if now - _last_data_sent < _MIN_DATA_INTERVAL:
+        # Return lightweight "no change" marker so frontend doesn't update
+        return jsonify({"throttled": True}), 200
+    _last_data_sent = now
+
     return jsonify({
-        'word': infer.current_word,
-        'buffer': infer.word_buffer,
-        'sentence': infer.final_sentence,
-        'status': infer.detection_status,
-        'confidence': infer.confidence_score,
-        'fps': infer.current_fps,
-        'stopActive': infer.stop_active,
+        'word':          infer.current_word,
+        'buffer':        infer.word_buffer,
+        'sentence':      infer.final_sentence,
+        'status':        infer.detection_status,
+        'confidence':    infer.confidence_score,
+        'fps':           infer.current_fps,
+        'stopActive':    infer.stop_active,
         'stopStartTime': infer.stop_start_time,
-        'stopBuffer': infer.buffer_controller.get_buffer()
+        'stopBuffer':    infer.buffer_controller.get_buffer(),
     })
-# last_sent = 0
 
-# @app.route('/data')
-# def get_data():
-#     global last_sent
-#     now = time()
-
-#     if now - last_sent < 0.2:
-#         return jsonify({})  # skip extra calls
-
-#     last_sent = now
 
 @app.route('/start', methods=['POST'])
 def start():
     infer.streaming = True
     return jsonify({"status": "started"})
 
+
 @app.route('/stop', methods=['POST'])
 def stop():
     infer.streaming = False
     return jsonify({"status": "stopped"})
 
+
 @app.route('/clear', methods=['POST'])
 def clear_sentence():
     infer.word_buffer.clear()
     infer.sentence_buffer.clear()
-    infer.current_word = ""
-    infer.final_sentence = ""
-    infer.stop_active = False
+    infer.current_word    = ""
+    infer.final_sentence  = ""
+    infer.stop_active     = False
     infer.stop_start_time = None
-    infer.buffer_controller.buffer = []
+    infer.buffer_controller.buffer    = []
     infer.buffer_controller.recording = False
     return jsonify({'success': True})
+
 
 @app.route('/speech', methods=['POST'])
 def toggle_speech():
@@ -71,8 +82,88 @@ def toggle_speech():
     infer.speech_enabled = data.get('enabled', True)
     return jsonify({'success': True})
 
+
 if __name__ == '__main__':
     detection_thread = threading.Thread(target=infer.run_detection, daemon=True)
     detection_thread.start()
-
     app.run(host='0.0.0.0', port=5000, threaded=True)
+
+
+# # app.py
+
+# from flask import Flask, Response, jsonify, request
+# from flask_cors import CORS
+# import threading
+# import inference_mlp as infer
+# # from time import time
+
+# app = Flask(__name__)
+# CORS(app)
+
+# @app.route('/video')
+# def video_feed():
+#     # print("📡 Video stream requested")
+#     return Response(
+#         infer.generate_frames(),
+#         mimetype='multipart/x-mixed-replace; boundary=frame',
+#         headers={"Cache-Control": "no-cache", "Connection": "keep-alive"}
+#     )
+
+# @app.route('/data')
+# def get_data():
+#     return jsonify({
+#         'word': infer.current_word,
+#         'buffer': infer.word_buffer,
+#         'sentence': infer.final_sentence,
+#         'status': infer.detection_status,
+#         'confidence': infer.confidence_score,
+#         'fps': infer.current_fps,
+#         'stopActive': infer.stop_active,
+#         'stopStartTime': infer.stop_start_time,
+#         'stopBuffer': infer.buffer_controller.get_buffer()
+#     })
+# # last_sent = 0
+
+# # @app.route('/data')
+# # def get_data():
+# #     global last_sent
+# #     now = time()
+
+# #     if now - last_sent < 0.2:
+# #         return jsonify({})  # skip extra calls
+
+# #     last_sent = now
+
+# @app.route('/start', methods=['POST'])
+# def start():
+#     infer.streaming = True
+#     return jsonify({"status": "started"})
+
+# @app.route('/stop', methods=['POST'])
+# def stop():
+#     infer.streaming = False
+#     return jsonify({"status": "stopped"})
+
+# @app.route('/clear', methods=['POST'])
+# def clear_sentence():
+#     infer.word_buffer.clear()
+#     infer.sentence_buffer.clear()
+#     infer.current_word = ""
+#     infer.final_sentence = ""
+#     infer.stop_active = False
+#     infer.stop_start_time = None
+#     infer.buffer_controller.buffer = []
+#     infer.buffer_controller.recording = False
+#     return jsonify({'success': True})
+
+# @app.route('/speech', methods=['POST'])
+# def toggle_speech():
+#     data = request.json
+#     infer.speech_enabled = data.get('enabled', True)
+#     return jsonify({'success': True})
+
+# if __name__ == '__main__':
+#     detection_thread = threading.Thread(target=infer.run_detection, daemon=True)
+#     detection_thread.start()
+
+#     app.run(host='0.0.0.0', port=5000, threaded=True)
